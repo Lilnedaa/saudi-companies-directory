@@ -4,3 +4,6 @@ __pycache__/
 .DS_Store
 campaign_emails.csv
 lead_scoring_results.csv
+credentials.json
+token.json
+data/

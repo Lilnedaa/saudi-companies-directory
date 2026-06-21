@@ -268,6 +268,214 @@ def evaluate_single_opportunity(data: dict) -> dict:
 
 
 # ─────────────────────────────────────────────
+# Auto BANT Assessment (no manual form fields)
+# ─────────────────────────────────────────────
+
+AUTO_BANT_PROMPT = """You are an expert sales qualification agent for BeamData, an AI and data solutions company in Saudi Arabia.
+
+Analyze this potential client and evaluate the sales opportunity using the BANT framework.
+Infer each criterion intelligently from the company profile and their email reply (if any).
+
+Company Profile:
+  Name: {company_name}
+  Sector: {sector}
+  Sub-sector: {sub_sector}
+  Employees: {employees}
+  City: {city}
+  Description: {description}
+  Tags: {tags}
+  Founded: {founded_year}
+
+Campaign Email Subject Sent: {email_subject}
+
+Their Reply:
+{email_reply}
+
+Evaluate using BANT (each scored 0-25):
+- Budget (0-25): Infer budget capacity from company size, sector maturity, and any reply signals.
+- Authority (0-25): Assess if the respondent or company structure suggests decision-maker involvement.
+- Need (0-25): Evaluate how strongly their sector, description, and reply indicate a need for AI/data solutions.
+- Timeline (0-25): Infer urgency from reply tone, sector trends, and any time-related signals.
+
+Return ONLY valid JSON:
+{{
+  "bant": {{
+    "budget_score": <0-25>,
+    "budget_reason": "<one sentence>",
+    "authority_score": <0-25>,
+    "authority_reason": "<one sentence>",
+    "need_score": <0-25>,
+    "need_reason": "<one sentence>",
+    "timeline_score": <0-25>,
+    "timeline_reason": "<one sentence>"
+  }},
+  "opportunity_score": <integer 0-100, sum of BANT scores>,
+  "status": "<Qualified | Not Qualified>",
+  "reason": "<concise one-sentence overall assessment>",
+  "recommended_next_step": "<concrete next action>"
+}}"""
+
+
+def evaluate_opportunity_auto(company_data: dict, email_reply: str = "") -> dict:
+    """
+    Automatically evaluates an opportunity using BANT framework.
+    No manual form inputs needed — AI infers everything from company profile + reply.
+    """
+    prompt = AUTO_BANT_PROMPT.format(
+        company_name=company_data.get("company_name", "N/A"),
+        sector=company_data.get("sector", "N/A"),
+        sub_sector=company_data.get("sub_sector", "N/A"),
+        employees=company_data.get("employees", "N/A"),
+        city=company_data.get("city", "N/A"),
+        description=company_data.get("description", "N/A"),
+        tags=company_data.get("tags", "N/A"),
+        founded_year=company_data.get("founded_year", "N/A"),
+        email_subject=company_data.get("email_subject", "BeamData Introduction"),
+        email_reply=email_reply.strip() if email_reply.strip() else "(No reply received yet — evaluate based on company profile only)",
+    )
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=500,
+                response_format={"type": "json_object"},
+            )
+            result_text = response.choices[0].message.content.strip()
+            result = json.loads(result_text)
+
+            raw_score = result.get("opportunity_score", 0)
+            result["opportunity_score"] = max(0, min(100, int(raw_score)))
+
+            if result.get("status") not in ("Qualified", "Not Qualified"):
+                result["status"] = (
+                    "Qualified" if result["opportunity_score"] >= QUALIFY_THRESHOLD
+                    else "Not Qualified"
+                )
+
+            result["assessment_mode"] = "auto_bant"
+            return result
+
+        except (json.JSONDecodeError, OpenAIError, ValueError, TypeError) as exc:
+            logger.warning("Auto BANT attempt %d/%d failed: %s", attempt, MAX_RETRIES, exc)
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY)
+
+    return {
+        "opportunity_score": 0,
+        "status": "Error",
+        "reason": f"AI evaluation failed after {MAX_RETRIES} attempts.",
+        "recommended_next_step": "Manual review required.",
+        "assessment_mode": "auto_bant",
+    }
+
+
+# ─────────────────────────────────────────────
+# Custom Criteria Assessment
+# ─────────────────────────────────────────────
+
+CUSTOM_CRITERIA_PROMPT = """You are an expert sales qualification agent for BeamData, an AI and data solutions company in Saudi Arabia.
+
+Evaluate this sales opportunity based on the custom scoring criteria defined below.
+
+Company Profile:
+  Name: {company_name}
+  Sector: {sector}
+  Sub-sector: {sub_sector}
+  Employees: {employees}
+  City: {city}
+  Description: {description}
+  Tags: {tags}
+  Founded: {founded_year}
+
+Their Reply:
+{email_reply}
+
+Custom Scoring Criteria:
+{custom_criteria}
+
+Instructions:
+- Evaluate the company against EACH criterion listed.
+- Score each criterion out of 100.
+- Calculate a weighted average for the total opportunity_score.
+- Be objective and base scores on evidence from the company profile and reply.
+
+Return ONLY valid JSON:
+{{
+  "criteria_scores": [
+    {{"criterion": "<name>", "score": <0-100>, "reason": "<one sentence>"}}
+  ],
+  "opportunity_score": <integer 0-100, weighted average>,
+  "status": "<Qualified | Not Qualified>",
+  "reason": "<concise one-sentence overall assessment>",
+  "recommended_next_step": "<concrete next action>"
+}}"""
+
+
+def evaluate_opportunity_custom(company_data: dict, custom_criteria: str, email_reply: str = "") -> dict:
+    """
+    Evaluates an opportunity against user-defined custom scoring criteria.
+    """
+    prompt = CUSTOM_CRITERIA_PROMPT.format(
+        company_name=company_data.get("company_name", "N/A"),
+        sector=company_data.get("sector", "N/A"),
+        sub_sector=company_data.get("sub_sector", "N/A"),
+        employees=company_data.get("employees", "N/A"),
+        city=company_data.get("city", "N/A"),
+        description=company_data.get("description", "N/A"),
+        tags=company_data.get("tags", "N/A"),
+        founded_year=company_data.get("founded_year", "N/A"),
+        email_reply=email_reply.strip() if email_reply.strip() else "(No reply received yet — evaluate based on company profile only)",
+        custom_criteria=custom_criteria.strip(),
+    )
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=600,
+                response_format={"type": "json_object"},
+            )
+            result_text = response.choices[0].message.content.strip()
+            result = json.loads(result_text)
+
+            raw_score = result.get("opportunity_score", 0)
+            result["opportunity_score"] = max(0, min(100, int(raw_score)))
+
+            if result.get("status") not in ("Qualified", "Not Qualified"):
+                result["status"] = (
+                    "Qualified" if result["opportunity_score"] >= QUALIFY_THRESHOLD
+                    else "Not Qualified"
+                )
+
+            result["assessment_mode"] = "custom_criteria"
+            return result
+
+        except (json.JSONDecodeError, OpenAIError, ValueError, TypeError) as exc:
+            logger.warning("Custom criteria attempt %d/%d failed: %s", attempt, MAX_RETRIES, exc)
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY)
+
+    return {
+        "opportunity_score": 0,
+        "status": "Error",
+        "reason": f"AI evaluation failed after {MAX_RETRIES} attempts.",
+        "recommended_next_step": "Manual review required.",
+        "assessment_mode": "custom_criteria",
+    }
+
+
+# ─────────────────────────────────────────────
 # Main Pipeline
 # ─────────────────────────────────────────────
 

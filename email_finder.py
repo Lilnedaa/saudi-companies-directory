@@ -1,0 +1,45 @@
+"""
+Email Finder — finds contact emails for companies via DuckDuckGo + website heuristics.
+"""
+
+import re
+from duckduckgo_search import DDGS
+
+
+def find_email_for_company(company_name: str, website: str = "", sector: str = "") -> str:
+    """
+    Tries to find a contact email for a company.
+    1. Infer info@domain from website
+    2. DuckDuckGo search
+    Returns the best email found, or empty string if none.
+    """
+    # Step 1: Infer from website domain
+    heuristic_email = ""
+    if website:
+        domain = (
+            website.replace("https://", "")
+            .replace("http://", "")
+            .replace("www.", "")
+            .strip()
+            .rstrip("/")
+            .split("/")[0]
+        )
+        if "." in domain and " " not in domain:
+            heuristic_email = f"info@{domain}"
+
+    # Step 2: DuckDuckGo search for contact email
+    try:
+        query = f'"{company_name}" contact email'
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+        for r in results:
+            text = r.get("body", "") + " " + r.get("href", "")
+            found = re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
+            for e in found:
+                e_lower = e.lower()
+                if not any(x in e_lower for x in ["example", "test", "noreply", "no-reply", "sentry", ".png", ".jpg"]):
+                    return e
+    except Exception:
+        pass
+
+    return heuristic_email

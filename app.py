@@ -4,7 +4,13 @@ import json
 import plotly.express as px
 from scorer import score_in_batches
 from campaign_agent import CampaignAgent
-from opportunity_agent import evaluate_single_opportunity
+from opportunity_agent import (
+    evaluate_single_opportunity,
+    evaluate_opportunity_auto,
+    evaluate_opportunity_custom,
+)
+from email_agent import is_gmail_configured, fetch_unread_emails, classify_and_draft, send_email as gmail_send
+from email_finder import find_email_for_company
 from rag import initialize_rag
 from proposal_agent import build_agent as build_proposal_agent
 from proposal_pdf import generate_proposal_pdf
@@ -188,9 +194,20 @@ if 'proposal_pdf_path' not in st.session_state:
     st.session_state.proposal_pdf_path = None
 if 'proposal_text' not in st.session_state:
     st.session_state.proposal_text = None
+if 'sent_emails' not in st.session_state:
+    st.session_state.sent_emails = {}        # {company_name: "sent" | "error msg"}
+if 'found_emails' not in st.session_state:
+    st.session_state.found_emails = {}       # {company_name: email_address}
+if 'email_inbox' not in st.session_state:
+    st.session_state.email_inbox = None
+if 'email_ai_results' not in st.session_state:
+    st.session_state.email_ai_results = {}   # {email_id: AI result dict}
 
 # ── Tabs ─────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📋 Companies List", "📊 Analytics", "🎯 Lead Scoring", "📧 Campaign", "🤝 Opportunity", "📄 Proposal"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "📋 Companies List", "📊 Analytics", "🎯 Lead Scoring",
+    "📧 Campaign", "📨 Email Agent", "🤝 Opportunity", "📄 Proposal"
+])
 
 with tab1:
     if filtered.empty:
@@ -530,9 +547,20 @@ with tab4:
             st.markdown("---")
             st.markdown(f"#### ✉️ {len(emails)} Emails Generated")
 
+            # Gmail status banner
+            if is_gmail_configured():
+                st.success("✅ Gmail configured — you can send emails directly from here.")
+            else:
+                st.warning(
+                    "⚙️ Gmail not configured. To enable sending, add `GMAIL_ADDRESS` and "
+                    "`GMAIL_APP_PASSWORD` to your `.env` file. "
+                    "[How to create Gmail App Password](https://myaccount.google.com/apppasswords)"
+                )
+
             for i, e in enumerate(emails):
+                company_name = e.get('company_name', 'N/A')
                 with st.container(border=True):
-                    st.markdown(f"**{i+1}. {e.get('company_name', 'N/A')}**")
+                    st.markdown(f"**{i+1}. {company_name}**")
                     st.caption(f"📍 {e.get('city', 'N/A')}  ·  🏷️ {e.get('sector', 'N/A')}")
                     st.markdown(f"**Subject:** {e.get('email_subject', '')}")
                     st.text_area(
@@ -543,6 +571,58 @@ with tab4:
                         label_visibility="collapsed"
                     )
                     st.caption(f"🎯 Goal: {e.get('campaign_goal', '')}  ·  💡 Suggested: {e.get('suggested_service', '')}")
+                    if e.get("matched_projects"):
+                        st.caption(f"📁 Matched Past Projects: {e.get('matched_projects', '')}")
+
+                    # ── Email sending row ──────────────────────────
+                    st.markdown("---")
+                    existing_email = (
+                        e.get('email', '')
+                        or st.session_state.found_emails.get(company_name, '')
+                    )
+                    send_col1, send_col2, send_col3 = st.columns([3, 1, 1])
+                    with send_col1:
+                        recipient = st.text_input(
+                            "📧 Recipient email",
+                            value=existing_email,
+                            key=f"recipient_{i}",
+                            placeholder="Enter or auto-find email address",
+                            label_visibility="collapsed",
+                        )
+                    with send_col2:
+                        if st.button("🔍 Auto-find", key=f"find_{i}", use_container_width=True):
+                            with st.spinner("Searching..."):
+                                try:
+                                    found = find_email_for_company(
+                                        company_name,
+                                        website=e.get('website', ''),
+                                        sector=e.get('sector', ''),
+                                    )
+                                    if found:
+                                        st.session_state.found_emails[company_name] = found
+                                        st.rerun()
+                                    else:
+                                        st.warning("No email found.")
+                                except Exception as ex:
+                                    st.error(str(ex))
+                    with send_col3:
+                        sent_status = st.session_state.sent_emails.get(company_name)
+                        if sent_status == "sent":
+                            st.success("✅ Sent!")
+                        else:
+                            send_disabled = not (is_gmail_configured() and recipient)
+                            if st.button("📤 Send", key=f"send_{i}", use_container_width=True, disabled=send_disabled):
+                                try:
+                                    gmail_send(
+                                        to_address=recipient,
+                                        subject=e.get('email_subject', 'BeamData Introduction'),
+                                        body=e.get('email_body', ''),
+                                    )
+                                    st.session_state.sent_emails[company_name] = "sent"
+                                    st.rerun()
+                                except Exception as ex:
+                                    st.session_state.sent_emails[company_name] = str(ex)
+                                    st.error(str(ex))
 
             st.markdown("---")
 
@@ -553,7 +633,8 @@ with tab4:
                 "company_name", "arabic_name", "sector", "sub_sector", "city",
                 "country", "website", "email", "phone", "linkedin_url",
                 "employees", "founded_year", "description", "tags",
-                "email_subject", "email_body", "campaign_goal", "suggested_service"
+                "email_subject", "email_body", "campaign_goal", "suggested_service",
+                "matched_projects",
             ]
             writer = csv_module.DictWriter(output, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
@@ -574,11 +655,115 @@ with tab4:
                 st.rerun()
 
 with tab5:
-    st.markdown("### 🤝 Opportunity Qualification")
+    st.markdown("### 📨 Email Agent — Inbox & Replies")
     st.markdown(
-        "After you send a campaign email and the company replies "
-        "(by email or call), enter what they said here. The AI will "
-        "score the opportunity and tell you if it's ready for a proposal."
+        "Read incoming replies to your campaign, let the AI classify and draft responses, "
+        "then approve and send with one click."
+    )
+
+    if not is_gmail_configured():
+        st.error(
+            "Gmail is not configured.\n\n"
+            "**How to set it up:**\n"
+            "1. Open your `.env` file in the project folder\n"
+            "2. Add these two lines:\n"
+            "```\nGMAIL_ADDRESS=your.email@gmail.com\nGMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx\n```\n"
+            "3. To get an App Password: [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) "
+            "(requires 2-Step Verification to be enabled)\n"
+            "4. Restart the Streamlit app"
+        )
+    else:
+        st.success(f"✅ Connected as: **{__import__('os').getenv('GMAIL_ADDRESS', '')}**")
+        st.markdown("---")
+
+        col_fetch, col_clear = st.columns([2, 1])
+        with col_fetch:
+            if st.button("📥 Fetch Unread Emails", type="primary", use_container_width=True):
+                with st.spinner("Connecting to Gmail inbox..."):
+                    try:
+                        st.session_state.email_inbox = fetch_unread_emails(limit=15)
+                        st.session_state.email_ai_results = {}
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"Could not connect to Gmail: {ex}")
+        with col_clear:
+            if st.button("🔄 Clear Inbox", use_container_width=True):
+                st.session_state.email_inbox = None
+                st.session_state.email_ai_results = {}
+                st.rerun()
+
+        if st.session_state.email_inbox is not None:
+            inbox = st.session_state.email_inbox
+            if not inbox:
+                st.info("📭 No unread emails in your inbox.")
+            else:
+                st.markdown(f"#### 📬 {len(inbox)} Unread Email{'s' if len(inbox) > 1 else ''}")
+                st.markdown("---")
+
+                for em in inbox:
+                    eid = em["id"]
+                    priority_color = {"High": "#f87171", "Medium": "#facc15", "Low": "#4ade80"}.get(
+                        st.session_state.email_ai_results.get(eid, {}).get("priority", ""), "#888"
+                    )
+                    with st.container(border=True):
+                        hdr_col, btn_col = st.columns([4, 1])
+                        with hdr_col:
+                            st.markdown(f"**From:** {em['from']}")
+                            st.markdown(f"**Subject:** {em['subject']}")
+                            st.caption(f"📅 {em['date']}")
+                        with btn_col:
+                            if st.button("🤖 Analyze", key=f"analyze_{eid}", use_container_width=True):
+                                with st.spinner("AI is analyzing..."):
+                                    result = classify_and_draft(em)
+                                    st.session_state.email_ai_results[eid] = result
+                                    st.rerun()
+
+                        with st.expander("📄 Email Body"):
+                            st.text(em["body"][:800])
+
+                        ai = st.session_state.email_ai_results.get(eid)
+                        if ai:
+                            st.markdown("---")
+                            p_col, c_col, s_col = st.columns(3)
+                            with p_col:
+                                st.markdown(f"**🏷️ Classification:** `{ai.get('classification', '')}`")
+                            with c_col:
+                                priority = ai.get('priority', 'Medium')
+                                p_emoji = "🔴" if priority == "High" else "🟡" if priority == "Medium" else "🟢"
+                                st.markdown(f"**{p_emoji} Priority:** `{priority}`")
+                            with s_col:
+                                st.markdown(f"**💡 Signals:** {ai.get('signals', '')}")
+
+                            st.markdown("**✏️ AI Draft Reply** (edit before sending):")
+                            draft_body = st.text_area(
+                                "",
+                                value=ai.get("draft_body", ""),
+                                height=140,
+                                key=f"draft_{eid}",
+                                label_visibility="collapsed",
+                            )
+                            draft_subject = ai.get("draft_subject", f"Re: {em['subject']}")
+
+                            # Extract reply-to address
+                            reply_to = em["from"]
+                            import re as _re
+                            found_addr = _re.findall(r"<(.+?)>", reply_to)
+                            reply_addr = found_addr[0] if found_addr else reply_to.strip()
+
+                            send_reply_col, _ = st.columns([1, 3])
+                            with send_reply_col:
+                                if st.button("📤 Send Reply", key=f"send_reply_{eid}", type="primary", use_container_width=True):
+                                    try:
+                                        gmail_send(reply_addr, draft_subject, draft_body)
+                                        st.success(f"✅ Reply sent to {reply_addr}")
+                                    except Exception as ex:
+                                        st.error(f"Send failed: {ex}")
+
+with tab6:
+    st.markdown("### 🤝 Opportunity Qualification — AI Assessment")
+    st.markdown(
+        "Select a company from your campaign, paste their reply (or leave blank for profile-only assessment), "
+        "and the AI will automatically qualify the opportunity — no manual form filling required."
     )
 
     if not st.session_state.campaign_emails:
@@ -588,64 +773,141 @@ with tab5:
         st.markdown("---")
 
         company_options = [e.get("company_name", f"Company {i}") for i, e in enumerate(emails)]
-        picked_name = st.selectbox("Select a company to log their response:", company_options)
+        picked_name = st.selectbox("Select a company:", company_options, key="opp_company_pick")
         picked_idx = company_options.index(picked_name)
         picked_email = emails[picked_idx]
 
+        # ── Company info card ──────────────────────────────────────
         with st.container(border=True):
-            st.markdown(f"**📨 Email sent to: {picked_email.get('company_name', 'N/A')}**")
-            st.caption(f"Subject: {picked_email.get('email_subject', '')}")
+            c_a, c_b, c_c = st.columns(3)
+            with c_a:
+                st.markdown(f"**🏢 {picked_email.get('company_name', '')}**")
+                st.caption(f"🏷️ {picked_email.get('sector', '')} · {picked_email.get('sub_sector', '')}")
+            with c_b:
+                st.caption(f"📍 {picked_email.get('city', '')}")
+                st.caption(f"👥 {picked_email.get('employees', 'N/A')} employees")
+            with c_c:
+                st.caption(f"📧 Subject sent: {picked_email.get('email_subject', '')[:60]}...")
 
-            col1, col2 = st.columns(2)
-            with col1:
-                budget = st.selectbox("💰 Budget", ["High", "Medium", "Low", "Unknown"], key="opp_budget")
-                decision_maker = st.selectbox("🧑‍💼 Decision Maker", ["Available", "Partially available", "Not available"], key="opp_dm")
-                timeline = st.selectbox("⏱️ Timeline", ["<3 months", "3-6 months", "Unknown"], key="opp_timeline")
-            with col2:
-                agreement_level = st.selectbox("🤝 Agreement Level", ["Strong", "Medium", "Weak"], key="opp_agreement")
-                potential_value = st.selectbox("📈 Potential Value", ["High", "Medium", "Low"], key="opp_value")
-                industry = st.text_input("🏷️ Industry", value=picked_email.get("sector", ""), key="opp_industry")
+        st.markdown("---")
 
-            need = st.text_area("🎯 What do they need? (from their reply)", key="opp_need", height=80)
-            email_response = st.text_area("✉️ Their reply (paste it or summarize it)", key="opp_response", height=100)
+        # ── Assessment mode selector ───────────────────────────────
+        assessment_mode = st.radio(
+            "**Choose assessment mode:**",
+            ["🎯 Auto Assessment (BANT)", "✍️ Custom Criteria"],
+            horizontal=True,
+            key="opp_mode"
+        )
 
-            evaluate_btn = st.button("🎯 Evaluate This Opportunity", type="primary", use_container_width=True)
+        email_reply = st.text_area(
+            "✉️ Their email reply (paste it here — or leave blank to assess from company profile only)",
+            key="opp_reply",
+            height=110,
+            placeholder="Dear BeamData team, thank you for reaching out. We are currently exploring AI solutions for our operations and would love to learn more..."
+        )
 
-            if evaluate_btn:
-                if not email_response.strip():
-                    st.error("Please enter their reply before evaluating.")
-                else:
-                    opp_data = {
-                        "company_name": picked_email.get("company_name", ""),
-                        "industry": industry,
-                        "budget": budget,
-                        "email_response": email_response,
-                        "need": need,
-                        "decision_maker": decision_maker,
-                        "timeline": timeline,
-                        "agreement_level": agreement_level,
-                        "potential_value": potential_value,
-                    }
-                    with st.spinner("🤖 Evaluating opportunity..."):
-                        try:
-                            result = evaluate_single_opportunity(opp_data)
-                            opp_data.update(result)
-                            st.session_state.opportunity_results[picked_email.get("company_name", "")] = opp_data
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error: {e}")
+        custom_criteria_text = ""
+        if assessment_mode == "✍️ Custom Criteria":
+            st.markdown("**Define your scoring criteria** — describe what makes an ideal client for BeamData:")
+            custom_criteria_text = st.text_area(
+                "",
+                key="opp_custom_criteria",
+                height=130,
+                label_visibility="collapsed",
+                placeholder=(
+                    "Example:\n"
+                    "- Company must have 200+ employees (weight: high)\n"
+                    "- Sector should be Fintech, Healthcare, or Telecom (weight: high)\n"
+                    "- Company should show interest in AI/data transformation (weight: medium)\n"
+                    "- Located in Riyadh or Jeddah (weight: low)"
+                )
+            )
 
-        # ── Show result for selected company, if evaluated ─────────
+        evaluate_btn = st.button("🤖 Evaluate This Opportunity", type="primary", use_container_width=True)
+
+        if evaluate_btn:
+            if assessment_mode == "✍️ Custom Criteria" and not custom_criteria_text.strip():
+                st.error("Please define your scoring criteria before evaluating.")
+            else:
+                with st.spinner("🤖 AI is evaluating the opportunity..."):
+                    try:
+                        company_ctx = {
+                            "company_name": picked_email.get("company_name", ""),
+                            "sector": picked_email.get("sector", ""),
+                            "sub_sector": picked_email.get("sub_sector", ""),
+                            "employees": picked_email.get("employees", ""),
+                            "city": picked_email.get("city", ""),
+                            "description": picked_email.get("description", ""),
+                            "tags": picked_email.get("tags", ""),
+                            "founded_year": picked_email.get("founded_year", ""),
+                            "email_subject": picked_email.get("email_subject", ""),
+                        }
+
+                        if assessment_mode == "🎯 Auto Assessment (BANT)":
+                            result = evaluate_opportunity_auto(company_ctx, email_reply)
+                        else:
+                            result = evaluate_opportunity_custom(company_ctx, custom_criteria_text, email_reply)
+
+                        result["company_name"] = picked_email.get("company_name", "")
+                        result["email_reply"] = email_reply
+                        result["assessment_mode"] = assessment_mode
+                        st.session_state.opportunity_results[picked_email.get("company_name", "")] = result
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+        # ── Show result for selected company ───────────────────────
         existing = st.session_state.opportunity_results.get(picked_email.get("company_name", ""))
         if existing:
             st.markdown("---")
             score = existing.get("opportunity_score", 0)
             status = existing.get("status", "")
+            mode_label = existing.get("assessment_mode", "")
             emoji = "🟢" if status == "Qualified" else "🔴" if status == "Not Qualified" else "⚪"
+
             with st.container(border=True):
-                st.markdown(f"### {emoji} Score: {score}/100 — `{status}`")
-                st.markdown(f"💬 **Reason:** {existing.get('reason', '')}")
+                st.markdown(f"### {emoji} Score: **{score}/100** — `{status}`")
+                st.caption(f"Assessment mode: {mode_label}")
+                st.markdown(f"💬 **Summary:** {existing.get('reason', '')}")
                 st.markdown(f"➡️ **Next step:** {existing.get('recommended_next_step', '')}")
+
+                # BANT breakdown
+                if existing.get("bant"):
+                    st.markdown("---")
+                    st.markdown("#### 📊 BANT Breakdown")
+                    bant = existing["bant"]
+                    b1, b2, b3, b4 = st.columns(4)
+                    with b1:
+                        b_score = bant.get("budget_score", 0)
+                        st.markdown(f'<div class="metric-card"><div class="metric-num">{b_score}/25</div><div class="metric-lbl">💰 Budget</div></div>', unsafe_allow_html=True)
+                        st.caption(bant.get("budget_reason", ""))
+                    with b2:
+                        a_score = bant.get("authority_score", 0)
+                        st.markdown(f'<div class="metric-card"><div class="metric-num">{a_score}/25</div><div class="metric-lbl">🧑‍💼 Authority</div></div>', unsafe_allow_html=True)
+                        st.caption(bant.get("authority_reason", ""))
+                    with b3:
+                        n_score = bant.get("need_score", 0)
+                        st.markdown(f'<div class="metric-card"><div class="metric-num">{n_score}/25</div><div class="metric-lbl">🎯 Need</div></div>', unsafe_allow_html=True)
+                        st.caption(bant.get("need_reason", ""))
+                    with b4:
+                        t_score = bant.get("timeline_score", 0)
+                        st.markdown(f'<div class="metric-card"><div class="metric-num">{t_score}/25</div><div class="metric-lbl">⏱️ Timeline</div></div>', unsafe_allow_html=True)
+                        st.caption(bant.get("timeline_reason", ""))
+
+                # Custom criteria breakdown
+                if existing.get("criteria_scores"):
+                    st.markdown("---")
+                    st.markdown("#### 📋 Criteria Breakdown")
+                    for c in existing["criteria_scores"]:
+                        c_score = c.get("score", 0)
+                        color = "#4ade80" if c_score >= 70 else "#facc15" if c_score >= 40 else "#f87171"
+                        with st.container(border=True):
+                            cols = st.columns([3, 1])
+                            with cols[0]:
+                                st.markdown(f"**{c.get('criterion', '')}**")
+                                st.caption(c.get("reason", ""))
+                            with cols[1]:
+                                st.markdown(f'<div style="text-align:center;font-size:1.4rem;font-weight:800;color:{color}">{c_score}</div>', unsafe_allow_html=True)
 
         # ── Summary table of all evaluated opportunities ───────────
         if st.session_state.opportunity_results:
@@ -653,13 +915,13 @@ with tab5:
             st.markdown("#### 📊 All Evaluated Opportunities")
 
             all_results = list(st.session_state.opportunity_results.values())
-            qualified = sum(1 for r in all_results if r.get("status") == "Qualified")
+            qualified_count = sum(1 for r in all_results if r.get("status") == "Qualified")
 
             m1, m2 = st.columns(2)
             with m1:
                 st.markdown(f'<div class="metric-card"><div class="metric-num">{len(all_results)}</div><div class="metric-lbl">Evaluated</div></div>', unsafe_allow_html=True)
             with m2:
-                st.markdown(f'<div class="metric-card"><div class="metric-num" style="color:#4ade80">{qualified}</div><div class="metric-lbl">🟢 Qualified — Proposal Ready</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="metric-card"><div class="metric-num" style="color:#4ade80">{qualified_count}</div><div class="metric-lbl">🟢 Qualified — Proposal Ready</div></div>', unsafe_allow_html=True)
 
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -671,6 +933,7 @@ with tab5:
                     with c1:
                         st.markdown(f"**{r.get('company_name', 'N/A')}**")
                         st.caption(f"💬 {r.get('reason', '')}")
+                        st.caption(f"Mode: {r.get('assessment_mode', '')}")
                     with c2:
                         st.markdown(f"### {emoji} {r.get('opportunity_score', 0)}")
 
@@ -679,8 +942,7 @@ with tab5:
             import csv as csv_module2, io as io_module2
             output2 = io_module2.StringIO()
             fieldnames2 = [
-                "company_name", "industry", "budget", "email_response", "need",
-                "decision_maker", "timeline", "agreement_level", "potential_value",
+                "company_name", "assessment_mode", "email_reply",
                 "opportunity_score", "status", "reason", "recommended_next_step"
             ]
             writer2 = csv_module2.DictWriter(output2, fieldnames=fieldnames2, extrasaction='ignore')
@@ -697,7 +959,7 @@ with tab5:
                 use_container_width=True
             )
 
-with tab6:
+with tab7:
     st.markdown("### 📄 Proposal Generator")
     st.markdown(
         "Pick a **Qualified** opportunity, confirm the agreed price, and the "

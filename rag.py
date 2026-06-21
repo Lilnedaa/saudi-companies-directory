@@ -12,6 +12,14 @@ def initialize_rag():
     Loads all PDF files from the data/ folder and builds a FAISS vector store.
     Returns a retriever ready for querying.
     """
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
+        raise FileNotFoundError(
+            f"The '{DATA_DIR}/' folder was just created. "
+            "Please add your BeamData PDF files (e.g. 'Beamdata Past Project Descriptions.pdf' "
+            "and 'Beam Data AI Hub Intro.pdf') into the data/ folder, then try again."
+        )
+
     pdf_files = [
         os.path.join(DATA_DIR, f)
         for f in os.listdir(DATA_DIR)
@@ -21,7 +29,7 @@ def initialize_rag():
     if not pdf_files:
         raise FileNotFoundError(
             f"No PDF files found in '{DATA_DIR}/' folder. "
-            "Please add your PDF files there and restart."
+            "Please add your BeamData PDF files there and try again."
         )
 
     all_documents = []
