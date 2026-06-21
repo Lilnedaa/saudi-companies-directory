@@ -2,18 +2,18 @@ import streamlit as st
 import pandas as pd
 import json
 import plotly.express as px
-from scorer import score_in_batches
-from campaign_agent import CampaignAgent
-from opportunity_agent import (
+from agents.campaign_agent import CampaignAgent
+from agents.opportunity_agent import (
     evaluate_single_opportunity,
     evaluate_opportunity_auto,
     evaluate_opportunity_custom,
 )
-from email_agent import is_gmail_configured, fetch_unread_emails, classify_and_draft, send_email as gmail_send
-from email_finder import find_email_for_company
-from rag import initialize_rag
-from proposal_agent import build_agent as build_proposal_agent
-from proposal_pdf import generate_proposal_pdf
+from agents.email_agent import is_gmail_configured, fetch_unread_emails, classify_and_draft, send_email as gmail_send
+from agents.proposal_agent import build_agent as build_proposal_agent
+from utils.scorer import score_in_batches
+from utils.email_finder import find_email_for_company
+from utils.rag import initialize_rag
+from utils.proposal_pdf import generate_proposal_pdf
 
 st.set_page_config(
     page_title="Saudi Companies Directory",
@@ -612,6 +612,15 @@ with tab4:
                         else:
                             send_disabled = not (is_gmail_configured() and recipient)
                             if st.button("📤 Send", key=f"send_{i}", use_container_width=True, disabled=send_disabled):
+                                st.session_state[f"confirm_send_{i}"] = True
+                                st.rerun()
+
+                    # ── Guardrail: confirm before sending ──
+                    if st.session_state.get(f"confirm_send_{i}"):
+                        st.warning(f"⚠️ Send email to **{recipient}**?")
+                        yes_col, no_col = st.columns(2)
+                        with yes_col:
+                            if st.button("✅ Yes, Send", key=f"confirm_yes_{i}", use_container_width=True, type="primary"):
                                 try:
                                     gmail_send(
                                         to_address=recipient,
@@ -619,10 +628,16 @@ with tab4:
                                         body=e.get('email_body', ''),
                                     )
                                     st.session_state.sent_emails[company_name] = "sent"
+                                    st.session_state.pop(f"confirm_send_{i}", None)
                                     st.rerun()
                                 except Exception as ex:
                                     st.session_state.sent_emails[company_name] = str(ex)
                                     st.error(str(ex))
+                                    st.session_state.pop(f"confirm_send_{i}", None)
+                        with no_col:
+                            if st.button("❌ Cancel", key=f"confirm_no_{i}", use_container_width=True):
+                                st.session_state.pop(f"confirm_send_{i}", None)
+                                st.rerun()
 
             st.markdown("---")
 
@@ -750,14 +765,29 @@ with tab5:
                             found_addr = _re.findall(r"<(.+?)>", reply_to)
                             reply_addr = found_addr[0] if found_addr else reply_to.strip()
 
+                            # ── Guardrail: confirm before sending reply ──
                             send_reply_col, _ = st.columns([1, 3])
                             with send_reply_col:
                                 if st.button("📤 Send Reply", key=f"send_reply_{eid}", type="primary", use_container_width=True):
-                                    try:
-                                        gmail_send(reply_addr, draft_subject, draft_body)
-                                        st.success(f"✅ Reply sent to {reply_addr}")
-                                    except Exception as ex:
-                                        st.error(f"Send failed: {ex}")
+                                    st.session_state[f"confirm_reply_{eid}"] = True
+                                    st.rerun()
+
+                            if st.session_state.get(f"confirm_reply_{eid}"):
+                                st.warning(f"⚠️ Send reply to **{reply_addr}**?")
+                                r_yes, r_no = st.columns(2)
+                                with r_yes:
+                                    if st.button("✅ Yes, Send", key=f"reply_yes_{eid}", type="primary", use_container_width=True):
+                                        try:
+                                            gmail_send(reply_addr, draft_subject, draft_body)
+                                            st.success(f"✅ Reply sent to {reply_addr}")
+                                            st.session_state.pop(f"confirm_reply_{eid}", None)
+                                        except Exception as ex:
+                                            st.error(f"Send failed: {ex}")
+                                            st.session_state.pop(f"confirm_reply_{eid}", None)
+                                with r_no:
+                                    if st.button("❌ Cancel", key=f"reply_no_{eid}", use_container_width=True):
+                                        st.session_state.pop(f"confirm_reply_{eid}", None)
+                                        st.rerun()
 
 with tab6:
     st.markdown("### 🤝 Opportunity Qualification — AI Assessment")

@@ -244,7 +244,15 @@ class CampaignAgent:
             text = response.choices[0].message.content.strip()
             text = text.replace("```json", "").replace("```", "").strip()
 
-            return json.loads(text)
+            data = json.loads(text)
+
+            # ── Guardrail: required fields must be non-empty strings ──
+            if not isinstance(data.get("email_subject"), str) or len(data["email_subject"].strip()) < 5:
+                return {}
+            if not isinstance(data.get("email_body"), str) or len(data["email_body"].strip()) < 30:
+                return {}
+
+            return data
 
         except Exception:
             return {}

@@ -162,6 +162,17 @@ def _fallback_draft(email_data: dict) -> dict:
     }
 
 
+_EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+
+
+def _validate_email(address: str) -> None:
+    """Raises ValueError if address is not a valid email format."""
+    if not address or not address.strip():
+        raise ValueError("Recipient email address is empty.")
+    if not _EMAIL_REGEX.match(address.strip()):
+        raise ValueError(f"Invalid email address format: '{address}'")
+
+
 def send_email(to_address: str, subject: str, body: str) -> None:
     """
     Sends an email via Gmail SMTP (SSL).
@@ -172,9 +183,17 @@ def send_email(to_address: str, subject: str, body: str) -> None:
             "Gmail not configured. Add GMAIL_ADDRESS and GMAIL_APP_PASSWORD to your .env file."
         )
 
+    # ── Guardrail: validate email format before attempting SMTP ──
+    _validate_email(to_address)
+
+    if not subject or not subject.strip():
+        raise ValueError("Email subject cannot be empty.")
+    if not body or not body.strip():
+        raise ValueError("Email body cannot be empty.")
+
     msg = MIMEMultipart()
     msg["From"] = GMAIL_ADDRESS
-    msg["To"] = to_address
+    msg["To"] = to_address.strip()
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain", "utf-8"))
 

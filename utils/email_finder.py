@@ -3,7 +3,11 @@ Email Finder — finds contact emails for companies via DuckDuckGo + website heu
 """
 
 import re
+import time
 from duckduckgo_search import DDGS
+
+_LAST_SEARCH_TIME: float = 0.0
+_MIN_INTERVAL: float = 1.2  # seconds between DuckDuckGo requests
 
 
 def find_email_for_company(company_name: str, website: str = "", sector: str = "") -> str:
@@ -29,6 +33,13 @@ def find_email_for_company(company_name: str, website: str = "", sector: str = "
 
     # Step 2: DuckDuckGo search for contact email
     try:
+        # ── Guardrail: rate limiting — min 1.2s between requests ──
+        global _LAST_SEARCH_TIME
+        elapsed = time.time() - _LAST_SEARCH_TIME
+        if elapsed < _MIN_INTERVAL:
+            time.sleep(_MIN_INTERVAL - elapsed)
+        _LAST_SEARCH_TIME = time.time()
+
         query = f'"{company_name}" contact email'
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=5))

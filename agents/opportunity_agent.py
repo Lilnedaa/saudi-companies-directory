@@ -349,8 +349,17 @@ def evaluate_opportunity_auto(company_data: dict, email_reply: str = "") -> dict
             result_text = response.choices[0].message.content.strip()
             result = json.loads(result_text)
 
-            raw_score = result.get("opportunity_score", 0)
-            result["opportunity_score"] = max(0, min(100, int(raw_score)))
+            # ── Guardrail: cap each BANT sub-score at its max (25) ──
+            if isinstance(result.get("bant"), dict):
+                bant = result["bant"]
+                for key in ("budget_score", "authority_score", "need_score", "timeline_score"):
+                    bant[key] = max(0, min(25, int(bant.get(key, 0))))
+                result["opportunity_score"] = sum(
+                    bant[k] for k in ("budget_score", "authority_score", "need_score", "timeline_score")
+                )
+            else:
+                raw_score = result.get("opportunity_score", 0)
+                result["opportunity_score"] = max(0, min(100, int(raw_score)))
 
             if result.get("status") not in ("Qualified", "Not Qualified"):
                 result["status"] = (
