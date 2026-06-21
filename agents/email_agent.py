@@ -12,7 +12,7 @@ How to get a Gmail App Password:
   3. Search "App passwords" → create one for "Mail"
   4. Copy the 16-character password to .env
 """
-
+import re
 import os
 import imaplib
 import email
