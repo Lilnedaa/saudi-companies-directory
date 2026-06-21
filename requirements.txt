@@ -1,0 +1,12 @@
+streamlit
+pandas
+plotly
+openai
+python-dotenv
+langchain==0.3.*
+langchain-openai==0.2.*
+langchain-community==0.3.*
+pypdf
+faiss-cpu
+duckduckgo-search
+reportlab

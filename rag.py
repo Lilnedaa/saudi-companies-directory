@@ -1,0 +1,49 @@
+
+import os
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+
+DATA_DIR = "data"
+
+def initialize_rag():
+    """
+    Loads all PDF files from the data/ folder and builds a FAISS vector store.
+    Returns a retriever ready for querying.
+    """
+    pdf_files = [
+        os.path.join(DATA_DIR, f)
+        for f in os.listdir(DATA_DIR)
+        if f.lower().endswith(".pdf")
+    ]
+
+    if not pdf_files:
+        raise FileNotFoundError(
+            f"No PDF files found in '{DATA_DIR}/' folder. "
+            "Please add your PDF files there and restart."
+        )
+
+    all_documents = []
+    for pdf_path in pdf_files:
+        loader = PyPDFLoader(pdf_path)
+        docs = loader.load()
+        all_documents.extend(docs)
+        print(f"Loaded: {pdf_path} ({len(docs)} pages)")
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=600,
+        chunk_overlap=150,
+        length_function=len,
+    )
+    chunks = text_splitter.split_documents(all_documents)
+    print(f"Total chunks created: {len(chunks)}")
+
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    vector_store = FAISS.from_documents(chunks, embeddings)
+
+    retriever = vector_store.as_retriever(
+        search_type="similarity_score_threshold",
+        search_kwargs={"score_threshold": 0.6, "k": 5},
+    )
+    return retriever
