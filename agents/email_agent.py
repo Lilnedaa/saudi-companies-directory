@@ -69,7 +69,10 @@ def _get_gmail_service():
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(CREDENTIALS_PATH), SCOPES
             )
-            creds = flow.run_local_server(port=0)
+            # timeout_seconds prevents the local OAuth callback server from
+            # blocking forever if the user closes the browser before granting
+            # consent — which otherwise hangs Streamlit on Ctrl+C.
+            creds = flow.run_local_server(port=0, timeout_seconds=120)
         TOKEN_PATH.write_text(creds.to_json())
 
     _gmail_service = build("gmail", "v1", credentials=creds)
