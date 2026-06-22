@@ -1,106 +1,194 @@
 """
-Email Agent — reads Gmail inbox via IMAP and sends replies via SMTP.
-Uses GPT-4o to classify emails and draft professional replies.
+Email Agent — Gmail OAuth integration.
 
-Setup (add to .env):
-  GMAIL_ADDRESS=your.email@gmail.com
-  GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx   ← Gmail App Password (not your normal password)
+Uses the Gmail API (not IMAP/SMTP) so the user signs in once with their
+Google account via a browser consent flow. Tokens are cached in
+`token.json` next to `credentials.json` at the project root.
 
-How to get a Gmail App Password:
-  1. Go to myaccount.google.com/security
-  2. Enable 2-Step Verification
-  3. Search "App passwords" → create one for "Mail"
-  4. Copy the 16-character password to .env
+Setup (one-time):
+  1. Google Cloud Console → APIs & Services → Credentials → OAuth client
+     ID → Desktop app, then save the file as `credentials.json` in this
+     project's root directory.
+  2. Launch the app, click "Sign in to Gmail" in the sidebar — a browser
+     window opens for consent. `token.json` is written on success.
 """
-import re
 import os
-import imaplib
-import email
-import smtplib
+import re
 import json
-from email.header import decode_header
+import base64
+from pathlib import Path
 from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from dotenv import load_dotenv
+
 from openai import OpenAI
+from dotenv import load_dotenv
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 
 load_dotenv()
 
-GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.modify",
+]
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CREDENTIALS_PATH = PROJECT_ROOT / "credentials.json"
+TOKEN_PATH = PROJECT_ROOT / "token.json"
+
+_gmail_service = None
+
+
+def _get_gmail_service():
+    """Return an authenticated Gmail API client. Opens a browser for OAuth
+    consent on first use, then reuses the cached token."""
+    global _gmail_service
+    if _gmail_service is not None:
+        return _gmail_service
+
+    creds = None
+    if TOKEN_PATH.exists():
+        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not CREDENTIALS_PATH.exists():
+                raise FileNotFoundError(
+                    f"Missing OAuth client file at {CREDENTIALS_PATH}.\n"
+                    "Get it from Google Cloud Console → APIs & Services → "
+                    "Credentials → OAuth client ID → Desktop app, then "
+                    "save it here as credentials.json."
+                )
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(CREDENTIALS_PATH), SCOPES
+            )
+            creds = flow.run_local_server(port=0)
+        TOKEN_PATH.write_text(creds.to_json())
+
+    _gmail_service = build("gmail", "v1", credentials=creds)
+    return _gmail_service
+
+
+# ── Auth helpers (called from the Streamlit sidebar) ─────────────────
+
+def is_signed_in() -> bool:
+    """True if a usable cached token exists. Never triggers consent."""
+    if not TOKEN_PATH.exists():
+        return False
+    try:
+        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+    except Exception:
+        return False
+    if not creds:
+        return False
+    if creds.valid:
+        return True
+    return bool(creds.expired and creds.refresh_token)
+
+
+def get_authenticated_email() -> str | None:
+    """If signed in, return the connected Gmail address; else None.
+    May refresh silently but never opens a browser."""
+    if not is_signed_in():
+        return None
+    try:
+        service = _get_gmail_service()
+        profile = service.users().getProfile(userId="me").execute()
+        return profile.get("emailAddress")
+    except Exception:
+        return None
+
+
+def sign_in_gmail() -> dict:
+    """Run the OAuth consent flow (opens a browser). Returns
+    {status, email}. Raises FileNotFoundError if credentials.json
+    is missing."""
+    global _gmail_service
+    _gmail_service = None
+    service = _get_gmail_service()
+    profile = service.users().getProfile(userId="me").execute()
+    return {
+        "status": "connected",
+        "email": profile.get("emailAddress"),
+        "messages_total": profile.get("messagesTotal"),
+    }
+
+
+def sign_out_gmail() -> dict:
+    """Disconnect by deleting the cached token."""
+    global _gmail_service
+    _gmail_service = None
+    if TOKEN_PATH.exists():
+        TOKEN_PATH.unlink()
+    return {"status": "disconnected"}
 
 
 def is_gmail_configured() -> bool:
-    return bool(GMAIL_ADDRESS and GMAIL_APP_PASSWORD)
+    """Backwards-compatible alias used across the UI. With OAuth this is
+    equivalent to "the user is signed in"."""
+    return is_signed_in()
 
+
+# ── Email body extraction (Gmail API format) ─────────────────────────
+
+def _decode(data: str) -> str:
+    return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+
+
+def _extract_body(payload: dict) -> str:
+    if "parts" in payload:
+        for part in payload["parts"]:
+            if part.get("mimeType") == "text/plain" and part.get("body", {}).get("data"):
+                return _decode(part["body"]["data"])
+        for part in payload["parts"]:
+            nested = _extract_body(part)
+            if nested:
+                return nested
+    if payload.get("body", {}).get("data"):
+        return _decode(payload["body"]["data"])
+    return ""
+
+
+# ── Inbox ────────────────────────────────────────────────────────────
 
 def fetch_unread_emails(limit: int = 15) -> list[dict]:
-    """
-    Connects to Gmail via IMAP and fetches the latest unread emails.
-    Returns a list of dicts with id, subject, from, date, body.
-    """
-    mail = imaplib.IMAP4_SSL("imap.gmail.com")
-    mail.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-    mail.select("inbox")
+    """Fetch unread Gmail messages via the Gmail API.
+    Returns dicts with id, subject, from, date, body."""
+    service = _get_gmail_service()
+    listing = service.users().messages().list(
+        userId="me", q="is:unread", maxResults=limit
+    ).execute()
 
-    _, message_numbers = mail.search(None, "UNSEEN")
-    nums = message_numbers[0].split()
-    if not nums:
-        mail.logout()
-        return []
-
-    nums = nums[-limit:]
-    result = []
-
-    for num in reversed(nums):
-        _, msg_data = mail.fetch(num, "(RFC822)")
-        raw = msg_data[0][1]
-        msg = email.message_from_bytes(raw)
-
-        # Decode subject
-        raw_subject, enc = decode_header(msg.get("Subject", "") or "")[0]
-        if isinstance(raw_subject, bytes):
-            subject = raw_subject.decode(enc or "utf-8", errors="ignore")
-        else:
-            subject = raw_subject or "(no subject)"
-
-        from_addr = msg.get("From", "")
-        date_str = msg.get("Date", "")
-
-        # Extract plain text body
-        body = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                ct = part.get_content_type()
-                cd = str(part.get("Content-Disposition", ""))
-                if ct == "text/plain" and "attachment" not in cd:
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        body = payload.decode("utf-8", errors="ignore")
-                        break
-        else:
-            payload = msg.get_payload(decode=True)
-            if payload:
-                body = payload.decode("utf-8", errors="ignore")
-
-        result.append({
-            "id": num.decode(),
-            "subject": subject,
-            "from": from_addr,
-            "date": date_str,
+    refs = listing.get("messages", [])
+    emails = []
+    for ref in refs:
+        msg = service.users().messages().get(
+            userId="me", id=ref["id"], format="full"
+        ).execute()
+        headers = {h["name"].lower(): h["value"] for h in msg["payload"]["headers"]}
+        body = _extract_body(msg["payload"])
+        emails.append({
+            "id": ref["id"],
+            "thread_id": msg.get("threadId"),
+            "subject": headers.get("subject", "(no subject)"),
+            "from": headers.get("from", ""),
+            "date": headers.get("date", ""),
             "body": body[:2000],
         })
+    return emails
 
-    mail.logout()
-    return result
 
+# ── AI classification & draft (unchanged behaviour) ──────────────────
 
 def classify_and_draft(email_data: dict) -> dict:
-    """
-    Uses GPT-4o to classify an email and draft a professional reply.
-    Returns a dict with classification, signals, priority, draft_subject, draft_body.
-    """
+    """Classify an incoming email and draft a professional reply."""
     if not OPENAI_API_KEY:
         return _fallback_draft(email_data)
 
@@ -162,41 +250,48 @@ def _fallback_draft(email_data: dict) -> dict:
     }
 
 
+# ── Sending ──────────────────────────────────────────────────────────
+
 _EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 
 
 def _validate_email(address: str) -> None:
-    """Raises ValueError if address is not a valid email format."""
     if not address or not address.strip():
         raise ValueError("Recipient email address is empty.")
     if not _EMAIL_REGEX.match(address.strip()):
         raise ValueError(f"Invalid email address format: '{address}'")
 
 
-def send_email(to_address: str, subject: str, body: str) -> None:
-    """
-    Sends an email via Gmail SMTP (SSL).
-    Raises an exception if sending fails.
-    """
-    if not (GMAIL_ADDRESS and GMAIL_APP_PASSWORD):
+def send_email(to_address: str, subject: str, body: str,
+               thread_id: str | None = None) -> dict:
+    """Send an email via the Gmail API as the signed-in user."""
+    if not is_signed_in():
         raise EnvironmentError(
-            "Gmail not configured. Add GMAIL_ADDRESS and GMAIL_APP_PASSWORD to your .env file."
+            "Not signed in to Gmail. Click 'Sign in to Gmail' in the sidebar first."
         )
 
-    # ── Guardrail: validate email format before attempting SMTP ──
     _validate_email(to_address)
-
     if not subject or not subject.strip():
         raise ValueError("Email subject cannot be empty.")
     if not body or not body.strip():
         raise ValueError("Email body cannot be empty.")
 
-    msg = MIMEMultipart()
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = to_address.strip()
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain", "utf-8"))
+    service = _get_gmail_service()
+    mime = MIMEText(body)
+    mime["to"] = to_address.strip()
+    mime["subject"] = subject
+    raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        server.send_message(msg)
+    payload = {"raw": raw}
+    if thread_id:
+        payload["threadId"] = thread_id
+
+    sent = service.users().messages().send(userId="me", body=payload).execute()
+
+    return {
+        "status": "sent",
+        "message_id": sent.get("id"),
+        "thread_id": sent.get("threadId"),
+        "to": to_address.strip(),
+        "subject": subject,
+    }

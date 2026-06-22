@@ -8,7 +8,16 @@ from agents.opportunity_agent import (
     evaluate_opportunity_auto,
     evaluate_opportunity_custom,
 )
-from agents.email_agent import is_gmail_configured, fetch_unread_emails, classify_and_draft, send_email as gmail_send
+from agents.email_agent import (
+    is_gmail_configured,
+    fetch_unread_emails,
+    classify_and_draft,
+    send_email as gmail_send,
+    is_signed_in,
+    get_authenticated_email,
+    sign_in_gmail,
+    sign_out_gmail,
+)
 from agents.proposal_agent import build_agent as build_proposal_agent
 from utils.scorer import score_in_batches
 from utils.email_finder import find_email_for_company
@@ -117,6 +126,39 @@ st.markdown('<div class="header-sub">Browse & filter companies across all sector
 
 # ── Sidebar Filters ─────────────────────────────────────────────────
 with st.sidebar:
+    # ── Gmail sign-in ───────────────────────────────────────────────
+    st.markdown("## 📬 Gmail Account")
+
+    if "gmail_email" not in st.session_state:
+        st.session_state.gmail_email = get_authenticated_email()
+
+    current_email = st.session_state.gmail_email
+
+    if current_email:
+        st.success(f"✓ Connected\n\n`{current_email}`")
+        if st.button("🚪 Sign out", key="gmail_signout", use_container_width=True):
+            sign_out_gmail()
+            st.session_state.gmail_email = None
+            st.rerun()
+    else:
+        st.warning("Not connected — sending and inbox features are disabled.")
+        if st.button("🔐 Sign in to Gmail", key="gmail_signin",
+                     type="primary", use_container_width=True):
+            try:
+                with st.spinner("Opening browser for Gmail consent…"):
+                    result = sign_in_gmail()
+                st.session_state.gmail_email = result.get("email")
+                st.success(f"Connected as {result.get('email')}")
+                st.rerun()
+            except FileNotFoundError as exc:
+                st.error(str(exc))
+                st.caption("Put your OAuth `credentials.json` (Google Cloud → "
+                           "OAuth client ID → Desktop app) in the project root.")
+            except Exception as exc:
+                st.error(f"Sign-in failed: {exc}")
+
+    st.markdown("---")
+
     st.markdown("## 🔍 Filter Companies")
 
     st.markdown('<div class="filter-header">📂 Sector — pick one or more</div>', unsafe_allow_html=True)
@@ -549,12 +591,14 @@ with tab4:
 
             # Gmail status banner
             if is_gmail_configured():
-                st.success("✅ Gmail configured — you can send emails directly from here.")
+                st.success(
+                    f"✅ Signed in as **{st.session_state.get('gmail_email', '')}** — "
+                    "you can send emails directly from here."
+                )
             else:
                 st.warning(
-                    "⚙️ Gmail not configured. To enable sending, add `GMAIL_ADDRESS` and "
-                    "`GMAIL_APP_PASSWORD` to your `.env` file. "
-                    "[How to create Gmail App Password](https://myaccount.google.com/apppasswords)"
+                    "🔐 Gmail not connected. Use **Sign in to Gmail** in the left "
+                    "sidebar to enable sending."
                 )
 
             for i, e in enumerate(emails):
@@ -677,18 +721,11 @@ with tab5:
     )
 
     if not is_gmail_configured():
-        st.error(
-            "Gmail is not configured.\n\n"
-            "**How to set it up:**\n"
-            "1. Open your `.env` file in the project folder\n"
-            "2. Add these two lines:\n"
-            "```\nGMAIL_ADDRESS=your.email@gmail.com\nGMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx\n```\n"
-            "3. To get an App Password: [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) "
-            "(requires 2-Step Verification to be enabled)\n"
-            "4. Restart the Streamlit app"
+        st.warning(
+            "🔐 Gmail not connected. Use **Sign in to Gmail** in the left sidebar to enable inbox and replies."
         )
     else:
-        st.success(f"✅ Connected as: **{__import__('os').getenv('GMAIL_ADDRESS', '')}**")
+        st.success(f"✅ Connected as: **{st.session_state.get('gmail_email', '')}**")
         st.markdown("---")
 
         col_fetch, col_clear = st.columns([2, 1])
