@@ -1,5 +1,10 @@
 
 import os
+# macOS OpenMP workaround — must be set before FAISS / numpy import.
+# See top of app.py for context. Setting here too so any code path
+# that imports utils.rag directly is protected.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings

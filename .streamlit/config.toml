@@ -1,0 +1,15 @@
+[server]
+# Disable the file watcher. Streamlit's auto/poll watchers walk every
+# imported module in sys.modules to set up file watches. The conda env
+# has `transformers` installed (as a transitive dep), which uses lazy
+# imports — touching its vision submodules triggers
+# `from torchvision...` ImportErrors that the watcher prints as
+# tracebacks. Disabling the watcher silences that noise.
+# Tradeoff: no hot-reload — restart `streamlit run` after editing code.
+fileWatcherType = "none"
+
+[logger]
+# Hide INFO-level chatter (e.g. "file_cache is only supported with
+# oauth2client<4.0.0" from googleapiclient). Errors and warnings still
+# print.
+level = "error"
